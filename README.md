@@ -1,5 +1,6 @@
 # deepSfM
 Library for 3d reconstruction (structure from motion) from sets of 2d images or videos using deep learning based feature extraction + matching and triangulation + bundle adjustment via COLMAP.
+The image matching is done with `LightGlue` which can either use `SuperPoint`, `DISK` or `ALIKED`. We use `DISK` for the example since it generally performs well and seems a bit less sensitive to outlier correspondences.
 
 To reconstruct and visualize the pointcloud + camera positions from a set of scene images, run
 ```python
