@@ -73,7 +73,6 @@ def reconstruct_images(images_path, output_path=None, one_camera=False):
 	if output_path is not None:
 		output_path = Path(output_path)
 		output_path.mkdir(exist_ok=True, parents=True)
-		breakpoint()
 		if reconstructions:
 			for idx in reconstructions:
 				r_dir = output_path / f"reconstruction_{idx}"
