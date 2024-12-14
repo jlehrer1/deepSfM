@@ -17,6 +17,8 @@ from copy import deepcopy
 from functools import partial
 
 class ClipRegistration:
+    VALID_IMG_EXTENSIONS = [".jpg", ".jpeg", ".png"]
+    VALID_CAM_MODELS = ["SIMPLE_RADIAL", "SIMPLE_RADIAL_FISHEYE", "PINHOLE", "PINHOLE_FISHEYE"]
     def __init__(
         self,
         clips: list[tuple[int]] = None,
@@ -311,7 +313,8 @@ class DeepClipFeatureMatchingCOLMAP(COLMAPClipRegistration):
         self.camera_mode = camera_mode
         
         self.pairs = None # set later
-        assert not Path(self.output_path).iterdir(), "Output path must be empty before registration"
+
+        Path(self.output_path).mkdir(exist_ok=True, parents=True)
     
     @staticmethod
     def image_name_to_id(database_path) -> dict[str, str]:
@@ -356,7 +359,7 @@ class DeepClipFeatureMatchingCOLMAP(COLMAPClipRegistration):
 
     def extract_all_features(self, img_dir):
         print(f"Extracting features from all images...")
-        files = [f for f in os.listdir(img_dir)]
+        files = [f for f in os.listdir(img_dir) if f.endswith(tuple(self.VALID_IMG_EXTENSIONS))]
         feature_map = {}
         for file in tqdm(files):
             img = load_image(os.path.join(img_dir, file))

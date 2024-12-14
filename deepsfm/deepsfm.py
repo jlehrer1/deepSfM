@@ -36,8 +36,11 @@ def reconstruct_video(video_path, output_path=None):
 		output_path = Path(output_path)
 		output_path.mkdir(exist_ok=True, parents=True)
 
-		for idx, reconstruction in enumerate(reconstructions):
-			reconstruction.write(str(output_path / f"reconstruction_{idx}"))
+		if reconstructions:
+			for idx in reconstructions:
+				r_dir = output_path / f"reconstruction_{idx}"
+				r_dir.mkdir(exist_ok=True, parents=True)
+				reconstructions[idx].write(str(r_dir))
 							
 	return reconstructions
 
@@ -70,8 +73,11 @@ def reconstruct_images(images_path, output_path=None, one_camera=False):
 	if output_path is not None:
 		output_path = Path(output_path)
 		output_path.mkdir(exist_ok=True, parents=True)
-
-		for idx, reconstruction in enumerate(reconstructions):
-			reconstruction.write(str(output_path / f"reconstruction_{idx}"))
+		breakpoint()
+		if reconstructions:
+			for idx in reconstructions:
+				r_dir = output_path / f"reconstruction_{idx}"
+				r_dir.mkdir(exist_ok=True, parents=True)
+				reconstructions[idx].write(str(r_dir))
 							
 	return reconstructions
