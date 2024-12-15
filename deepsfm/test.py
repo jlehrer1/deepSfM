@@ -14,7 +14,9 @@ tform = Compose(
 
 path = Path("/Users/julian/Downloads/room")
 
-recon = reconstruct_images(path, output_path=path.parent / "reconstruction", one_camera=False)
+# recon = reconstruct_images(path, output_path=path.parent / "reconstruction", one_camera=False)
+recon = pycolmap.Reconstruction()
+recon.read("/Users/julian/reconstruction2/sparse/0")
 fig = init_figure()
-plot_reconstruction(fig, recon[0], color='rgba(255,0,0,0.5)', name="mapping", points_rgb=True)
+plot_reconstruction(fig, recon, color='rgba(255,0,0,0.5)', name="mapping", points_rgb=True)
 fig.show()
