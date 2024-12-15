@@ -33,19 +33,18 @@ def reconstruct_video(video_path, output_path=None):
 
 	reconstructions = registration.register()
 	if output_path is not None:
-		output_path = Path(output_path)
+		output_path = Path(output_path) / "sparse"
 		output_path.mkdir(exist_ok=True, parents=True)
-
 		if reconstructions:
 			for idx in reconstructions:
-				r_dir = output_path / f"reconstruction_{idx}"
+				r_dir = output_path / str(idx)
 				r_dir.mkdir(exist_ok=True, parents=True)
 				reconstructions[idx].write(str(r_dir))
 							
 	return reconstructions
 
 
-def reconstruct_images(images_path, output_path=None, one_camera=False):
+def reconstruct_images(images_path, output_path=None, one_camera=True, **registration_class_kwargs):
 	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 	extractor = DISK(max_num_keypoints=2048).eval().to(device)
 	matcher = LightGlue(features='disk').eval().to(device)
@@ -67,15 +66,16 @@ def reconstruct_images(images_path, output_path=None, one_camera=False):
 		camera_model="SIMPLE_PINHOLE",
 		output_path=output_path if output_path else "deepsfm_output",
 		camera_mode=camera_mode,
+		**registration_class_kwargs,
 	)
 
 	reconstructions = registration.register()
 	if output_path is not None:
-		output_path = Path(output_path)
+		output_path = Path(output_path) / "sparse"
 		output_path.mkdir(exist_ok=True, parents=True)
 		if reconstructions:
 			for idx in reconstructions:
-				r_dir = output_path / f"reconstruction_{idx}"
+				r_dir = output_path / str(idx)
 				r_dir.mkdir(exist_ok=True, parents=True)
 				reconstructions[idx].write(str(r_dir))
 							

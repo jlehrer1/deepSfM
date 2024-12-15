@@ -359,7 +359,15 @@ class DeepClipFeatureMatchingCOLMAP(COLMAPClipRegistration):
 
     def extract_all_features(self, img_dir):
         print(f"Extracting features from all images...")
-        files = [f for f in os.listdir(img_dir) if f.endswith(tuple(self.VALID_IMG_EXTENSIONS))]
+        files = [f for f in os.listdir(img_dir)]
+        valid_files = [f for f in files if f.lower().endswith(tuple(self.VALID_IMG_EXTENSIONS))]
+
+        if len(valid_files) == 0:
+            raise ValueError(f"No valid image files found in {img_dir}, extensions must be one of {self.VALID_IMG_EXTENSIONS}")
+        
+        if len(valid_files) < len(files):
+            print(f"Found {len(files) - len(valid_files)} invalid files in {img_dir}, ignoring these files.")
+
         feature_map = {}
         for file in tqdm(files):
             img = load_image(os.path.join(img_dir, file))
