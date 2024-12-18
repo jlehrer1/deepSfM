@@ -157,7 +157,7 @@ class COLMAPClipRegistration(ClipRegistration):
             image_dir = Path(self.images_path)
 
         database_path = output_path / "database.db"
-        n_images = len(list(image_dir.glob("*")))  # potentially possible in future once we add filtering to sampling
+        n_images = len([f for f in image_dir.glob("*") if f.suffix.lower() in self.VALID_IMG_EXTENSIONS])
 
         if n_images > 0:
             pycolmap.extract_features(  # extract features using SIFT
@@ -184,8 +184,8 @@ class COLMAPClipRegistration(ClipRegistration):
             shutil.rmtree(output_path)
 
             return maps if len(maps) > 0 else None
-
-        return None
+        else:
+            raise ValueError(f"No valid images found in {image_dir}")
 
     def register(
         self,
