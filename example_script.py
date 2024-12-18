@@ -5,10 +5,10 @@ from pathlib import Path
 from torchvision.transforms import Resize, Compose, PILToTensor
 
 # path to images
-path = Path("/Users/julian/Downloads/banana/images")
+path = Path("/Users/julian/reconstruction")
 
 recon = reconstruct_images(path, one_camera=False)
 
 fig = init_figure()
-plot_reconstruction(fig, recon[0], color='rgba(255,0,0,0.5)', name="mapping", points_rgb=True, cameras=False)
+plot_reconstruction(fig, recon[0], color='rgba(255,0,0,0.5)', name="mapping", points_rgb=True, cameras=True)
 fig.show()

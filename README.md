@@ -32,3 +32,4 @@ fig.show()
 
 These top-level functions are for ease of use, but the classes in image_registration.py provide more depth into the image matching and reconstruction process.
 
+The plot reconstruction function will open a web page with an html rendering of your sparse pointcloud and camera frustums from the SfM process. 
