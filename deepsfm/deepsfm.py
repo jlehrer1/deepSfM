@@ -45,8 +45,8 @@ def reconstruct_video(video_path, output_path=None):
 	return reconstructions
 
 
-def reconstruct_images(images_path, output_path=None, one_camera=True, **registration_class_kwargs):
-	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def reconstruct_images(images_path, output_path=None, one_camera=True, device=None, **registration_class_kwargs):
+	device = torch.device("cuda" if torch.cuda.is_available() else "cpu") if device is None else device
 	extractor = DISK(max_num_keypoints=2048).eval().to(device)
 	matcher = LightGlue(features='disk').eval().to(device)
 
