@@ -12,6 +12,7 @@ import pycolmap
 import numpy as np
 import open3d as o3d
 import matplotlib.pyplot as plt
+from sklearn.cluster import DBSCAN
 
 class CameraViewGroundDetector:
     def __init__(self, recon_path):
@@ -348,35 +349,86 @@ class CameraViewGroundDetector:
         )
 
 
-from sklearn.cluster import DBSCAN
-
 class RLMeshCreator:
     def __init__(self, normalized_data):
         self.points = normalized_data['points']
         self.colors = normalized_data['colors']
         self.camera_positions = normalized_data.get('camera_positions', [])
-        self.min_z = self.points[:, 2].min()  # Store minimum Z value
+        self.min_z = self.points[:, 2].min()
         
-    def create_environment_mesh(self):
+    def remove_top_faces_from_mesh(self, mesh, z_threshold_percentile=90):
+        """Remove triangles that form tops/ceilings"""
+        vertices = np.asarray(mesh.vertices)
+        triangles = np.asarray(mesh.triangles)
+        
+        # Calculate Z threshold - remove triangles above this
+        z_threshold = np.percentile(vertices[:, 2], z_threshold_percentile)
+        
+        # Get triangle centers
+        triangle_centers = []
+        for tri in triangles:
+            center = vertices[tri].mean(axis=0)
+            triangle_centers.append(center)
+        triangle_centers = np.array(triangle_centers)
+        
+        # Keep only triangles below threshold
+        keep_mask = triangle_centers[:, 2] < z_threshold
+        filtered_triangles = triangles[keep_mask]
+        
+        print(f"Removed {len(triangles) - len(filtered_triangles)} top faces above Z={z_threshold:.2f}")
+        
+        # Create new mesh
+        new_mesh = o3d.geometry.TriangleMesh()
+        new_mesh.vertices = mesh.vertices
+        new_mesh.triangles = o3d.utility.Vector3iVector(filtered_triangles)
+        new_mesh.vertex_colors = mesh.vertex_colors
+        
+        return new_mesh
+    
+    def remove_horizontal_faces_by_normal(self, mesh, normal_threshold=0.7):
+        """Remove triangles with normals pointing up (horizontal faces)"""
+        mesh.compute_triangle_normals()
+        triangle_normals = np.asarray(mesh.triangle_normals)
+        triangles = np.asarray(mesh.triangles)
+        
+        # Keep triangles where normal Z component is less than threshold
+        # (i.e., not pointing straight up)
+        keep_mask = triangle_normals[:, 2] < normal_threshold
+        filtered_triangles = triangles[keep_mask]
+        
+        print(f"Removed {len(triangles) - len(filtered_triangles)} horizontal faces by normal")
+        
+        new_mesh = o3d.geometry.TriangleMesh()
+        new_mesh.vertices = mesh.vertices
+        new_mesh.triangles = o3d.utility.Vector3iVector(filtered_triangles)
+        new_mesh.vertex_colors = mesh.vertex_colors
+        
+        return new_mesh
+    
+    def create_environment_mesh_no_roof(self, add_walls=True):
+        """Create environment mesh WITHOUT any roof/ceiling"""
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(self.points)
         pcd.colors = o3d.utility.Vector3dVector(self.colors)
-        
         pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.5, max_nn=30))
-        
+
         mesh = None
         
+        # Try alpha shapes first (but remove tops)
         for alpha in [0.2, 0.3, 0.5, 0.8]:
             try:
                 test_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pcd, alpha)
                 if len(test_mesh.triangles) > 50:
-                    mesh = test_mesh
-                    print(f"Alpha shapes: alpha={alpha}, triangles={len(mesh.triangles)}")
+                    # Remove top faces from alpha shape
+                    mesh = self.remove_horizontal_faces_by_normal(test_mesh)
+                    mesh = self.remove_top_faces_from_mesh(mesh)
+                    print(f"Alpha shapes: alpha={alpha}, triangles after roof removal={len(mesh.triangles)}")
                     break
             except:
                 continue
-        
-        if mesh is None:
+
+        # Fallback: Ball pivoting (but remove tops)
+        if mesh is None or len(mesh.triangles) < 20:
             try:
                 distances = pcd.compute_nearest_neighbor_distance()
                 avg_dist = np.mean(distances)
@@ -384,24 +436,42 @@ class RLMeshCreator:
                 mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
                     pcd, o3d.utility.DoubleVector(radii)
                 )
-                print(f"Ball pivoting: triangles={len(mesh.triangles)}")
+                mesh = self.remove_horizontal_faces_by_normal(mesh)
+                mesh = self.remove_top_faces_from_mesh(mesh)
+                print(f"Ball pivoting: triangles after roof removal={len(mesh.triangles)}")
             except:
-                mesh = self._create_convex_clusters()
-        
+                pass
+
+        # Last resort: Create walls only (NO full box)
         if mesh is None or len(mesh.triangles) == 0:
-            mesh = self._create_convex_clusters()
-        
-        mesh.remove_degenerate_triangles()
-        mesh.remove_duplicated_triangles()
-        mesh.remove_duplicated_vertices()
-        mesh.compute_vertex_normals()
-        
-        if not mesh.has_vertex_colors():
-            mesh.paint_uniform_color([0.7, 0.7, 0.7])
-        
-        return mesh
-    
-    def _create_convex_clusters(self):
+            mesh = self._create_walls_only_mesh()
+
+        # Create proper thick ground plane
+        ground_mesh = self.create_thick_ground_plane()
+
+        # Add boundary walls if requested
+        walls = []
+        if add_walls:
+            walls = self.create_boundary_walls()
+
+        # Combine all (environment + ground + walls)
+        combined_mesh = mesh + ground_mesh
+        for wall in walls:
+            combined_mesh += wall
+
+        # Cleanup
+        combined_mesh.remove_degenerate_triangles()
+        combined_mesh.remove_duplicated_triangles()
+        combined_mesh.remove_duplicated_vertices()
+        combined_mesh.compute_vertex_normals()
+
+        if not combined_mesh.has_vertex_colors():
+            combined_mesh.paint_uniform_color([0.7, 0.7, 0.7])
+
+        return combined_mesh
+
+    def _create_walls_only_mesh(self):
+        """Create walls from point cloud clusters without tops"""
         clustering = DBSCAN(eps=0.5, min_samples=10)
         labels = clustering.fit_predict(self.points)
         
@@ -414,52 +484,105 @@ class RLMeshCreator:
                 continue
                 
             try:
-                cluster_pcd = o3d.geometry.PointCloud()
-                cluster_pcd.points = o3d.utility.Vector3dVector(cluster_points)
-                hull, _ = cluster_pcd.compute_convex_hull()
-                hull.paint_uniform_color([0.6, 0.6, 0.8])
-                meshes.append(hull)
+                # Create a wall-like structure from cluster
+                wall_mesh = self._create_vertical_wall_from_points(cluster_points)
+                if wall_mesh is not None:
+                    meshes.append(wall_mesh)
             except:
                 continue
         
-        if not meshes:
-            bounds_min = self.points.min(axis=0)
-            bounds_max = self.points.max(axis=0)
-            size = bounds_max - bounds_min
-            box = o3d.geometry.TriangleMesh.create_box(size[0], size[1], size[2])
-            box.translate(bounds_min)
-            box.paint_uniform_color([0.8, 0.8, 0.8])
-            return box
+        if meshes:
+            combined = meshes[0]
+            for mesh in meshes[1:]:
+                combined += mesh
+            return combined
+        else:
+            # Return empty mesh rather than full box
+            return o3d.geometry.TriangleMesh()
+    
+    def _create_vertical_wall_from_points(self, points):
+        """Create vertical wall geometry from point cluster"""
+        if len(points) < 4:
+            return None
+            
+        # Project points to XY plane for 2D convex hull
+        points_2d = points[:, :2]
         
-        combined = meshes[0]
-        for mesh in meshes[1:]:
-            combined += mesh
+        # Simple bounding rectangle approach
+        min_x, min_y = points_2d.min(axis=0)
+        max_x, max_y = points_2d.max(axis=0)
+        
+        # Get height range
+        min_z = points[:, 2].min()
+        max_z = points[:, 2].max()
+        
+        # Create vertical quads around the perimeter
+        thickness = 0.1
+        height = max_z - min_z
+        
+        if height < 0.2:  # Skip very flat clusters
+            return None
+        
+        # Create 4 walls around the bounding rectangle
+        walls = []
+        
+        # Front wall
+        wall = o3d.geometry.TriangleMesh.create_box(max_x - min_x, thickness, height)
+        wall.translate([min_x, min_y - thickness/2, min_z])
+        walls.append(wall)
+        
+        # Back wall  
+        wall = o3d.geometry.TriangleMesh.create_box(max_x - min_x, thickness, height)
+        wall.translate([min_x, max_y - thickness/2, min_z])
+        walls.append(wall)
+        
+        # Left wall
+        wall = o3d.geometry.TriangleMesh.create_box(thickness, max_y - min_y, height)
+        wall.translate([min_x - thickness/2, min_y, min_z])
+        walls.append(wall)
+        
+        # Right wall
+        wall = o3d.geometry.TriangleMesh.create_box(thickness, max_y - min_y, height)
+        wall.translate([max_x - thickness/2, min_y, min_z])
+        walls.append(wall)
+        
+        # Combine walls
+        combined = walls[0]
+        for wall in walls[1:]:
+            combined += wall
+            
+        combined.paint_uniform_color([0.6, 0.6, 0.8])
         return combined
     
-    def create_ground_plane(self, size=15):
-        """Create ground plane at minimum Z value with minimal thickness"""
-        thickness = 0.01  # Very thin ground plane
+    def create_thick_ground_plane(self, size=20, thickness=0.5):
+        """Create a THICK, solid ground plane"""
         ground = o3d.geometry.TriangleMesh.create_box(size, size, thickness)
-        # Place ground at minimum Z minus half thickness so top surface is at min_z
-        ground.translate([-size/2, -size/2, self.min_z - thickness/2])
-        ground.paint_uniform_color([0.6, 0.4, 0.2])
+        # Place ground so its TOP surface is at min_z
+        ground.translate([-size/2, -size/2, self.min_z - thickness])
+        ground.paint_uniform_color([0.4, 0.3, 0.2])  # Dark brown
         ground.compute_vertex_normals()
+        print(f"Created thick ground: top at Z={self.min_z:.3f}, thickness={thickness}")
         return ground
     
-    def create_walls_from_bounds(self, height=3.0, thickness=0.1):
+    def create_boundary_walls(self, height=4.0, thickness=0.2):
+        """Create boundary walls around the scene"""
         bounds_min = self.points.min(axis=0)
         bounds_max = self.points.max(axis=0)
         
-        x_min, y_min = bounds_min[:2]
-        x_max, y_max = bounds_max[:2]
+        # Extend bounds slightly
+        margin = 1.0
+        x_min, y_min = bounds_min[:2] - margin
+        x_max, y_max = bounds_max[:2] + margin
         
         walls = []
         
+        # 4 boundary walls
         wall_configs = [
-            ([x_min - thickness, y_min, self.min_z], [thickness, y_max - y_min, height]),
-            ([x_max, y_min, self.min_z], [thickness, y_max - y_min, height]),
-            ([x_min, y_min - thickness, self.min_z], [x_max - x_min, thickness, height]),
-            ([x_min, y_max, self.min_z], [x_max - x_min, thickness, height])
+            # position, size
+            ([x_min - thickness, y_min, self.min_z], [thickness, y_max - y_min, height]),  # Left
+            ([x_max, y_min, self.min_z], [thickness, y_max - y_min, height]),              # Right  
+            ([x_min, y_min - thickness, self.min_z], [x_max - x_min, thickness, height]), # Front
+            ([x_min, y_max, self.min_z], [x_max - x_min, thickness, height])              # Back
         ]
         
         for pos, size in wall_configs:
@@ -469,115 +592,43 @@ class RLMeshCreator:
             wall.compute_vertex_normals()
             walls.append(wall)
         
+        print(f"Created {len(walls)} boundary walls, height={height}")
         return walls
     
-    def create_rl_environment(self, add_walls=True):
-        print("Creating RL environment mesh...")
-        print(f"Ground plane will be placed at Z = {self.min_z:.3f}")
-        
-        env_mesh = self.create_environment_mesh()
-        ground_mesh = self.create_ground_plane()
-        
-        geometries = [env_mesh, ground_mesh]
-        
-        if add_walls:
-            walls = self.create_walls_from_bounds()
-            geometries.extend(walls)
-        
-        camera_spheres = []
-        for pos in self.camera_positions:
-            sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.1)
-            sphere.translate(pos)
-            sphere.paint_uniform_color([1, 0, 0])
-            camera_spheres.append(sphere)
-        
-        coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0)
-        
-        all_geometries = geometries + camera_spheres + [coordinate_frame]
-        
-        return {
-            'environment_mesh': env_mesh,
-            'ground_mesh': ground_mesh,
-            'walls': walls if add_walls else [],
-            'camera_spheres': camera_spheres,
-            'all_geometries': all_geometries
-        }
-    
-    def visualize_rl_environment(self, rl_env):
-        print("\nRL Environment Visualization:")
-        print("- Environment mesh: Reconstructed geometry")
-        print(f"- Brown ground: Navigation surface at Z = {self.min_z:.3f}")  
-        print("- Light blue walls: Boundaries")
-        print("- Red spheres: Camera positions")
-        print("- RGB axes: X=red, Y=green, Z=blue")
-        
-        vis = o3d.visualization.Visualizer()
-        vis.create_window(window_name="RL Environment Preview", width=1200, height=800)
-        
-        for geom in rl_env['all_geometries']:
-            vis.add_geometry(geom)
-        
-        vis.run()
-        vis.destroy_window()
-    
-    def get_environment_stats(self, rl_env):
-        env_mesh = rl_env['environment_mesh']
-        ground_mesh = rl_env['ground_mesh']
-        
-        env_vertices = len(env_mesh.vertices)
-        env_triangles = len(env_mesh.triangles)
-        ground_vertices = len(ground_mesh.vertices)
-        ground_triangles = len(ground_mesh.triangles)
-        
-        total_vertices = env_vertices + ground_vertices
-        total_triangles = env_triangles + ground_triangles
-        
-        if rl_env['walls']:
-            for wall in rl_env['walls']:
-                total_vertices += len(wall.vertices)
-                total_triangles += len(wall.triangles)
-        
-        bounds_min = np.asarray(env_mesh.vertices).min(axis=0)
-        bounds_max = np.asarray(env_mesh.vertices).max(axis=0)
-        scene_size = bounds_max - bounds_min
-        
-        print(f"\nEnvironment Statistics:")
-        print(f"Environment mesh: {env_vertices} vertices, {env_triangles} triangles")
-        print(f"Ground mesh: {ground_vertices} vertices, {ground_triangles} triangles")
-        print(f"Total: {total_vertices} vertices, {total_triangles} triangles")
-        print(f"Scene bounds: {bounds_min} to {bounds_max}")
-        print(f"Scene size: {scene_size}")
-        print(f"Camera positions: {len(rl_env['camera_spheres'])}")
-        print(f"Ground plane Z: {self.min_z:.3f}")
-        
-        is_watertight = env_mesh.is_watertight()
-        is_manifold = env_mesh.is_vertex_manifold() and env_mesh.is_edge_manifold()
-        
-        print(f"Mesh quality:")
-        print(f"  Watertight: {is_watertight}")
-        print(f"  Manifold: {is_manifold}")
-        
-        return {
-            'total_vertices': total_vertices,
-            'total_triangles': total_triangles,
-            'scene_size': scene_size,
-            'bounds': (bounds_min, bounds_max),
-            'watertight': is_watertight,
-            'manifold': is_manifold,
-            'ground_z': self.min_z
-        }
-
-def create_and_preview_rl_environment(normalized_data, add_walls=True, visualize=True):
+def create_fixed_rl_environment(normalized_data, add_walls=True, visualize=True):
+    """Create RL environment with NO invisible roof"""
     creator = RLMeshCreator(normalized_data)
-    rl_env = creator.create_rl_environment(add_walls=add_walls)
-    stats = creator.get_environment_stats(rl_env)
-
+    
+    print("Creating environment mesh WITHOUT roof...")
+    env_mesh = creator.create_environment_mesh_no_roof(add_walls=add_walls)
+    
+    # Add camera visualization
+    camera_spheres = []
+    for pos in creator.camera_positions:
+        sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.1)
+        sphere.translate(pos)
+        sphere.paint_uniform_color([1, 0, 0])
+        camera_spheres.append(sphere)
+    
+    coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0)
+    
+    all_geometries = [env_mesh, coordinate_frame] + camera_spheres
+    
     if visualize:
-        creator.visualize_rl_environment(rl_env)
-    return rl_env, stats
-
-def create_rl_env(normalized_data, add_walls=True):
-    creator = RLMeshCreator(normalized_data)
-    rl_env = creator.create_rl_environment(add_walls=add_walls)
-
-    return rl_env
+        print("\nVisualization:")
+        print("- Gray: Environment mesh (NO ROOF)")
+        print("- Brown: Thick ground plane") 
+        print("- Light blue: Boundary walls")
+        print("- Red spheres: Camera positions")
+        
+        o3d.visualization.draw_geometries(
+            all_geometries,
+            window_name="Fixed RL Environment - No Invisible Roof",
+            width=1200, height=800
+        )
+    
+    return {
+        'environment_mesh': env_mesh,
+        'camera_spheres': camera_spheres,
+        'all_geometries': all_geometries
+    }
