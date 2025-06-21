@@ -14,3 +14,5 @@ h5py
 joblib
 plotly
 seaborn
+pycolmap
+open3d
