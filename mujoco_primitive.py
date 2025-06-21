@@ -3,106 +3,155 @@ import open3d as o3d
 import mujoco
 import mujoco.viewer
 import time
+from deepsfm.mesh_creator import create_fixed_rl_environment
 
-def completely_remove_horizontal_faces(mesh, z_threshold=0.9):
-    """Remove ALL horizontal faces from mesh"""
+def add_thickness_to_mesh(mesh, thickness=0.1):
+    """Add thickness to thin mesh surfaces to make them solid"""
     
-    mesh.compute_triangle_normals()
-    normals = np.asarray(mesh.triangle_normals)
+    print(f"Adding {thickness} thickness to mesh...")
+    
+    vertices = np.asarray(mesh.vertices)
     triangles = np.asarray(mesh.triangles)
     
-    # Keep only triangles that are NOT horizontal
-    # (normal Z component less than threshold)
-    keep_mask = np.abs(normals[:, 2]) < z_threshold
-    filtered_triangles = triangles[keep_mask]
+    # Compute face normals
+    mesh.compute_triangle_normals()
+    triangle_normals = np.asarray(mesh.triangle_normals)
     
-    print(f"Removed {len(triangles) - len(filtered_triangles)} horizontal faces")
-    print(f"Kept {len(filtered_triangles)} non-horizontal faces")
+    # For each triangle, create a thick version by extruding along normal
+    new_vertices = []
+    new_triangles = []
+    vertex_count = 0
+    
+    for i, (tri, normal) in enumerate(zip(triangles, triangle_normals)):
+        # Get original triangle vertices
+        v1, v2, v3 = vertices[tri]
+        
+        # Create extruded vertices (offset along normal)
+        v1_ext = v1 - normal * thickness
+        v2_ext = v2 - normal * thickness  
+        v3_ext = v3 - normal * thickness
+        
+        # Add all 6 vertices (original + extruded)
+        new_vertices.extend([v1, v2, v3, v1_ext, v2_ext, v3_ext])
+        
+        # Create triangles for the thick surface
+        base = vertex_count
+        
+        # Original face
+        new_triangles.append([base, base+1, base+2])
+        # Extruded face (flipped normal)
+        new_triangles.append([base+3, base+5, base+4])
+        
+        # Side faces connecting original to extruded
+        # Side 1 (v1-v2 edge)
+        new_triangles.extend([
+            [base, base+3, base+4], [base, base+4, base+1]
+        ])
+        # Side 2 (v2-v3 edge)  
+        new_triangles.extend([
+            [base+1, base+4, base+5], [base+1, base+5, base+2]
+        ])
+        # Side 3 (v3-v1 edge)
+        new_triangles.extend([
+            [base+2, base+5, base+3], [base+2, base+3, base]
+        ])
+        
+        vertex_count += 6
     
     # Create new mesh
-    new_mesh = o3d.geometry.TriangleMesh()
-    new_mesh.vertices = mesh.vertices
-    new_mesh.triangles = o3d.utility.Vector3iVector(filtered_triangles)
-    new_mesh.vertex_colors = mesh.vertex_colors
-    new_mesh.compute_vertex_normals()
+    thick_mesh = o3d.geometry.TriangleMesh()
+    thick_mesh.vertices = o3d.utility.Vector3dVector(new_vertices)
+    thick_mesh.triangles = o3d.utility.Vector3iVector(new_triangles)
     
-    return new_mesh
+    # Clean up
+    thick_mesh = thick_mesh.remove_duplicated_vertices()
+    thick_mesh = thick_mesh.remove_duplicated_triangles()
+    thick_mesh = thick_mesh.remove_degenerate_triangles()
+    thick_mesh.compute_vertex_normals()
+    
+    print(f"Original: {len(vertices)} vertices, {len(triangles)} triangles")
+    print(f"Thick: {len(thick_mesh.vertices)} vertices, {len(thick_mesh.triangles)} triangles")
+    
+    return thick_mesh
 
-def create_ultra_clean_environment():
-    """Create environment with absolutely no horizontal faces except ground"""
+def create_thick_ground_and_walls(normalized_data, wall_thickness=0.2, ground_thickness=0.3):
+    """Create thick, solid ground and walls from your environment bounds"""
     
-    ground_size = 10
-    wall_height = 3
-    wall_thickness = 0.2
+    points = normalized_data['points']
+    min_bound = points.min(axis=0)
+    max_bound = points.max(axis=0)
+    
+    print(f"Environment bounds: {min_bound} to {max_bound}")
     
     meshes = []
     
-    # 1. Ground plane (the ONLY horizontal surface)
-    ground_vertices = np.array([
-        [-ground_size/2, -ground_size/2, 0],
-        [ground_size/2, -ground_size/2, 0],
-        [ground_size/2, ground_size/2, 0], 
-        [-ground_size/2, ground_size/2, 0]
+    # 1. Thick ground plane
+    ground_size_x = max_bound[0] - min_bound[0] + 2  # Add margin
+    ground_size_y = max_bound[1] - min_bound[1] + 2
+    ground_z = min_bound[2]
+    
+    ground = o3d.geometry.TriangleMesh.create_box(
+        ground_size_x, ground_size_y, ground_thickness
+    )
+    ground.translate([
+        min_bound[0] - 1,
+        min_bound[1] - 1, 
+        ground_z - ground_thickness
     ])
-    
-    ground_triangles = np.array([[0, 1, 2], [0, 2, 3]])
-    
-    ground = o3d.geometry.TriangleMesh()
-    ground.vertices = o3d.utility.Vector3dVector(ground_vertices)
-    ground.triangles = o3d.utility.Vector3iVector(ground_triangles)
     ground.paint_uniform_color([0.6, 0.4, 0.2])
     meshes.append(ground)
     
-    # 2. Create 4 walls as separate vertical rectangles (NO horizontal faces)
-    wall_configs = [
-        # Front wall
-        {
-            'vertices': np.array([
-                [-ground_size/2, -ground_size/2, 0],
-                [ground_size/2, -ground_size/2, 0], 
-                [ground_size/2, -ground_size/2, wall_height],
-                [-ground_size/2, -ground_size/2, wall_height]
-            ]),
-            'triangles': np.array([[0, 1, 2], [0, 2, 3]])
-        },
-        # Back wall  
-        {
-            'vertices': np.array([
-                [ground_size/2, ground_size/2, 0],
-                [-ground_size/2, ground_size/2, 0],
-                [-ground_size/2, ground_size/2, wall_height], 
-                [ground_size/2, ground_size/2, wall_height]
-            ]),
-            'triangles': np.array([[0, 1, 2], [0, 2, 3]])
-        },
-        # Left wall
-        {
-            'vertices': np.array([
-                [-ground_size/2, ground_size/2, 0],
-                [-ground_size/2, -ground_size/2, 0],
-                [-ground_size/2, -ground_size/2, wall_height],
-                [-ground_size/2, ground_size/2, wall_height] 
-            ]),
-            'triangles': np.array([[0, 1, 2], [0, 2, 3]])
-        },
-        # Right wall
-        {
-            'vertices': np.array([
-                [ground_size/2, -ground_size/2, 0],
-                [ground_size/2, ground_size/2, 0], 
-                [ground_size/2, ground_size/2, wall_height],
-                [ground_size/2, -ground_size/2, wall_height]
-            ]),
-            'triangles': np.array([[0, 1, 2], [0, 2, 3]])
-        }
-    ]
+    # 2. Thick boundary walls
+    wall_height = max_bound[2] - min_bound[2] + 1
+    margin = 1.5
     
-    for config in wall_configs:
-        wall = o3d.geometry.TriangleMesh()
-        wall.vertices = o3d.utility.Vector3dVector(config['vertices'])
-        wall.triangles = o3d.utility.Vector3iVector(config['triangles']) 
-        wall.paint_uniform_color([0.8, 0.8, 0.9])
-        meshes.append(wall)
+    # Front wall
+    wall = o3d.geometry.TriangleMesh.create_box(
+        ground_size_x + 2*wall_thickness, wall_thickness, wall_height
+    )
+    wall.translate([
+        min_bound[0] - 1 - wall_thickness,
+        min_bound[1] - 1 - wall_thickness,
+        min_bound[2]
+    ])
+    wall.paint_uniform_color([0.8, 0.8, 0.9])
+    meshes.append(wall)
+    
+    # Back wall
+    wall = o3d.geometry.TriangleMesh.create_box(
+        ground_size_x + 2*wall_thickness, wall_thickness, wall_height
+    )
+    wall.translate([
+        min_bound[0] - 1 - wall_thickness,
+        max_bound[1] + 1,
+        min_bound[2]
+    ])
+    wall.paint_uniform_color([0.8, 0.8, 0.9])
+    meshes.append(wall)
+    
+    # Left wall
+    wall = o3d.geometry.TriangleMesh.create_box(
+        wall_thickness, ground_size_y, wall_height
+    )
+    wall.translate([
+        min_bound[0] - 1 - wall_thickness,
+        min_bound[1] - 1,
+        min_bound[2]
+    ])
+    wall.paint_uniform_color([0.8, 0.8, 0.9])
+    meshes.append(wall)
+    
+    # Right wall
+    wall = o3d.geometry.TriangleMesh.create_box(
+        wall_thickness, ground_size_y, wall_height
+    )
+    wall.translate([
+        max_bound[0] + 1,
+        min_bound[1] - 1,
+        min_bound[2]
+    ])
+    wall.paint_uniform_color([0.8, 0.8, 0.9])
+    meshes.append(wall)
     
     # Combine all
     combined = meshes[0]
@@ -113,216 +162,165 @@ def create_ultra_clean_environment():
     combined.remove_duplicated_triangles()
     combined.compute_vertex_normals()
     
+    print(f"Created thick environment: {len(combined.vertices)} vertices, {len(combined.triangles)} triangles")
+    
     return combined
 
-def test_primitive_collision_alternative():
-    """Alternative: Use MuJoCo primitives for collision, mesh for visual"""
+def fix_your_original_environment():
+    """Fix your original environment to work with mesh collision"""
     
-    ground_size = 10
-    wall_height = 3
-    wall_thickness = 0.2
-    agent_start = 5.0
+    print("=== FIXING YOUR ORIGINAL ENVIRONMENT ===")
     
-    mjcf = f"""
-<mujoco model="primitive_collision">
-    <compiler angle="degree" meshdir="." />
-    <option timestep="0.01" gravity="0 0 -9.81"/>
+    # Load your data
+    data = np.load('camera_view_ground_env.npz')
+    normalized_data = {
+        'points': data['points'],
+        'colors': data['colors'],
+        'camera_positions': data['camera_positions'],
+        'camera_directions': data['camera_directions']
+    }
     
-    <worldbody>
-        <!-- Use primitive geometry for collision (guaranteed no tops) -->
-        <geom name="ground_collision" type="box" 
-              size="{ground_size/2} {ground_size/2} 0.05" 
-              pos="0 0 -0.05" 
-              rgba="0.6 0.4 0.2 1"
-              contype="1" conaffinity="1" 
-              friction="1 0.5 0.5"/>
-        
-        <!-- 4 wall collision boxes -->
-        <geom name="wall_front" type="box" 
-              size="{ground_size/2} {wall_thickness/2} {wall_height/2}" 
-              pos="0 {-ground_size/2 - wall_thickness/2} {wall_height/2}" 
-              rgba="0.8 0.8 0.9 1"
-              contype="1" conaffinity="1"/>
-              
-        <geom name="wall_back" type="box" 
-              size="{ground_size/2} {wall_thickness/2} {wall_height/2}" 
-              pos="0 {ground_size/2 + wall_thickness/2} {wall_height/2}" 
-              rgba="0.8 0.8 0.9 1"
-              contype="1" conaffinity="1"/>
-              
-        <geom name="wall_left" type="box" 
-              size="{wall_thickness/2} {ground_size/2} {wall_height/2}" 
-              pos="{-ground_size/2 - wall_thickness/2} 0 {wall_height/2}" 
-              rgba="0.8 0.8 0.9 1"
-              contype="1" conaffinity="1"/>
-              
-        <geom name="wall_right" type="box" 
-              size="{wall_thickness/2} {ground_size/2} {wall_height/2}" 
-              pos="{ground_size/2 + wall_thickness/2} 0 {wall_height/2}" 
-              rgba="0.8 0.8 0.9 1"
-              contype="1" conaffinity="1"/>
-        
-        <!-- Test agent -->
-        <body name="agent" pos="0 0 {agent_start}">
-            <freejoint/>
-            <geom name="agent_body" type="sphere" size="0.2" 
-                  rgba="1 0 0 1"
-                  contype="2" conaffinity="1"
-                  mass="1.0"/>
-            <inertial pos="0 0 0" mass="1" diaginertia="0.08 0.08 0.08"/>
-        </body>
-    </worldbody>
+    print("Loading your original environment...")
     
-    <contact>
-        <pair geom1="agent_body" geom2="ground_collision"/>
-        <pair geom1="agent_body" geom2="wall_front"/>
-        <pair geom1="agent_body" geom2="wall_back"/>
-        <pair geom1="agent_body" geom2="wall_left"/>
-        <pair geom1="agent_body" geom2="wall_right"/>
-    </contact>
-</mujoco>
-"""
-    
-    print("Testing primitive collision alternative...")
-    print("This uses MuJoCo box primitives - guaranteed no invisible tops!")
-    
+    # Method 1: Try to fix your existing mesh by adding thickness
     try:
-        model = mujoco.MjModel.from_xml_string(mjcf)
-        data = mujoco.MjData(model)
+        rl_env = create_fixed_rl_environment(
+            normalized_data, add_walls=True, visualize=False
+        )
         
-        print("✅ Primitive model loaded!")
+        original_mesh = rl_env['environment_mesh'] + rl_env['ground_mesh']
+        if rl_env['walls']:
+            for wall in rl_env['walls']:
+                original_mesh += wall
         
-        # Test physics
-        for step in range(500):
-            mujoco.mj_step(model, data)
-            
-            if step % 100 == 0:
-                agent_z = data.qpos[2]
-                fall_distance = agent_start - agent_z
-                velocity = data.qvel[2]
-                print(f"t={step/100:.0f}s: Z={agent_z:.3f}, fell={fall_distance:.3f}, vz={velocity:.3f}")
+        print("Attempting to add thickness to your original mesh...")
+        thick_mesh = add_thickness_to_mesh(original_mesh, thickness=0.15)
         
-        final_z = data.qpos[2]
-        expected_final = 0.2  # Ball radius above ground
+        # Test this mesh
+        test_mesh_collision(thick_mesh, "thick_original", normalized_data)
         
-        if abs(final_z - expected_final) < 0.3:
-            print(f"✅ PRIMITIVE SUCCESS! Ball at Z={final_z:.3f}")
-            return True
-        else:
-            print(f"❌ Primitive failed: Ball at Z={final_z:.3f}")
-            return False
-            
     except Exception as e:
-        print(f"❌ Primitive test failed: {e}")
-        return False
+        print(f"Failed to thicken original mesh: {e}")
+        thick_mesh = None
+    
+    # Method 2: Create thick ground and walls from scratch
+    print("\nCreating thick ground and walls from environment bounds...")
+    simple_thick_mesh = create_thick_ground_and_walls(normalized_data)
+    
+    # Test this mesh
+    test_mesh_collision(simple_thick_mesh, "thick_simple", normalized_data)
+    
+    return thick_mesh, simple_thick_mesh
 
-def test_ultra_clean_mesh():
-    """Test the ultra-clean mesh with no horizontal faces"""
+def test_mesh_collision(mesh, name, normalized_data):
+    """Test a mesh for collision in MuJoCo"""
     
-    print("Creating ultra-clean mesh (only ground is horizontal)...")
-    mesh = create_ultra_clean_environment()
+    print(f"\n--- Testing {name} mesh ---")
     
-    # Debug the mesh
-    mesh.compute_triangle_normals()
-    normals = np.asarray(mesh.triangle_normals)
-    horizontal_faces = np.sum(np.abs(normals[:, 2]) > 0.9)
+    # Save mesh
+    filename = f"{name}_environment.obj"
+    success = o3d.io.write_triangle_mesh(filename, mesh, write_ascii=True)
     
-    print(f"Ultra-clean mesh debug:")
-    print(f"  Triangles: {len(mesh.triangles)}")
-    print(f"  Horizontal faces: {horizontal_faces}")
-    print(f"  Expected: 2 (ground only)")
+    if not success:
+        print(f"❌ Failed to save {filename}")
+        return False
     
-    # Further clean if needed
-    if horizontal_faces > 2:
-        print("Removing excess horizontal faces...")
-        mesh = completely_remove_horizontal_faces(mesh, z_threshold=0.8)
-        
-        # Re-add just the ground
-        ground_vertices = np.array([
-            [-5, -5, 0], [5, -5, 0], [5, 5, 0], [-5, 5, 0]
-        ])
-        ground_triangles = np.array([[0, 1, 2], [0, 2, 3]])
-        
-        ground_mesh = o3d.geometry.TriangleMesh()
-        ground_mesh.vertices = o3d.utility.Vector3dVector(ground_vertices)
-        ground_mesh.triangles = o3d.utility.Vector3iVector(ground_triangles)
-        ground_mesh.paint_uniform_color([0.6, 0.4, 0.2])
-        
-        mesh = mesh + ground_mesh
-        mesh.remove_duplicated_vertices()
-        mesh.compute_vertex_normals()
-    
-    # Save and test
-    mesh_filename = "ultra_clean.obj"
-    o3d.io.write_triangle_mesh(mesh_filename, mesh, write_ascii=True)
-    
+    # Get bounds
     bounds = mesh.get_axis_aligned_bounding_box()
-    agent_start = bounds.max_bound[2] + 2
+    min_bound = bounds.min_bound
+    max_bound = bounds.max_bound
+    agent_start = max_bound[2] + 1.0
     
+    # Create MuJoCo XML
     mjcf = f"""
-<mujoco model="ultra_clean">
+<mujoco model="{name}_test">
     <compiler angle="degree" meshdir="." />
     <option timestep="0.01" gravity="0 0 -9.81"/>
     
     <asset>
-        <mesh name="clean_mesh" file="{mesh_filename}"/>
+        <mesh name="env_mesh" file="{filename}"/>
     </asset>
     
     <worldbody>
-        <geom name="environment" type="mesh" mesh="clean_mesh" pos="0 0 0" 
+        <!-- Your fixed mesh -->
+        <geom name="environment" type="mesh" mesh="env_mesh" pos="0 0 0" 
               rgba="0.7 0.7 0.7 1" 
-              contype="1" conaffinity="1"/>
+              contype="1" conaffinity="1" 
+              friction="1 0.5 0.5"/>
         
-        <body name="agent" pos="0 0 {agent_start}">
+        <!-- Test ball -->
+        <body name="ball" pos="0 0 {agent_start}">
             <freejoint/>
-            <geom name="agent_body" type="sphere" size="0.2" 
-                  rgba="1 0 0 1"
-                  contype="2" conaffinity="1"/>
-            <inertial pos="0 0 0" mass="1" diaginertia="0.08 0.08 0.08"/>
+            <geom name="ball_geom" type="sphere" size="0.15" 
+                  rgba="1 0.2 0.2 1"
+                  contype="2" conaffinity="1"
+                  mass="1.0"/>
+            <inertial pos="0 0 0" mass="1" diaginertia="0.06 0.06 0.06"/>
         </body>
-    </worldbody>
+        
+        <!-- Camera positions for reference -->
+"""
+    
+    # Add camera position markers
+    for i, pos in enumerate(normalized_data['camera_positions'][:5]):  # First 5 cameras
+        mjcf += f"""        <geom name="cam_{i}" type="sphere" size="0.05" pos="{pos[0]} {pos[1]} {pos[2]}" 
+              rgba="0 1 0 0.7" contype="0" conaffinity="0"/>
+"""
+    
+    mjcf += f"""    </worldbody>
     
     <contact>
-        <pair geom1="agent_body" geom2="environment"/>
+        <pair geom1="ball_geom" geom2="environment"/>
     </contact>
 </mujoco>
 """
     
+    # Test the model
     try:
         model = mujoco.MjModel.from_xml_string(mjcf)
         data = mujoco.MjData(model)
         
-        print("✅ Ultra-clean mesh loaded!")
+        print(f"✅ {name} model loaded successfully!")
         
-        for step in range(500):
+        # Run physics test
+        for step in range(400):
             mujoco.mj_step(model, data)
-            if step % 100 == 0:
-                print(f"t={step/100:.0f}s: Z={data.qpos[2]:.3f}")
+            
+            if step in [100, 200, 300, 399]:
+                ball_z = data.qpos[2]
+                fall_distance = agent_start - ball_z
+                print(f"  t={step/100:.1f}s: Ball Z={ball_z:.3f}, fell={fall_distance:.3f}")
         
-        return data.qpos[2] < 1.0  # Should be near ground
+        final_z = data.qpos[2]
+        expected_ground = min_bound[2] + 0.15  # Ball radius
         
+        if abs(final_z - expected_ground) < 0.5:
+            print(f"🎉 {name} SUCCESS! Ball landed at Z={final_z:.3f}")
+            
+            # Launch interactive viewer for successful mesh
+            print(f"Launching interactive viewer for {name}...")
+            with mujoco.viewer.launch(model, data) as viewer:
+                step = 0
+                while viewer.is_running() and step < 1000:  # Run for 10 seconds
+                    if step % 500 == 0 and step > 0:  # Reset every 5 seconds
+                        data.qpos[0:3] = [0, 0, agent_start]
+                        data.qpos[3:7] = [1, 0, 0, 0]
+                        data.qvel[:] = 0
+                        mujoco.mj_forward(model, data)
+                    
+                    mujoco.mj_step(model, data)
+                    viewer.sync()
+                    step += 1
+                    time.sleep(0.01)
+            
+            return True
+        else:
+            print(f"❌ {name} FAILED: Ball at Z={final_z:.3f}, expected ~{expected_ground:.3f}")
+            return False
+    
     except Exception as e:
-        print(f"❌ Ultra-clean failed: {e}")
+        print(f"❌ {name} ERROR: {e}")
         return False
 
 if __name__ == "__main__":
-    print("Testing multiple approaches for your MuJoCo version...\n")
-    
-    # Test 1: Primitive collision (should definitely work)
-    success1 = test_primitive_collision_alternative()
-    
-    print("\n" + "="*50 + "\n")
-    
-    # Test 2: Ultra-clean mesh
-    success2 = test_ultra_clean_mesh()
-    
-    print(f"\nResults:")
-    print(f"Primitive collision: {'✅ SUCCESS' if success1 else '❌ FAILED'}")
-    print(f"Ultra-clean mesh: {'✅ SUCCESS' if success2 else '❌ FAILED'}")
-    
-    if success1:
-        print("\n✅ Use primitive collision for your real environment!")
-    elif success2:
-        print("\n✅ Ultra-clean mesh works - apply same cleaning to your point cloud!")
-    else:
-        print("\n❌ Both failed - there may be a deeper MuJoCo configuration issue.")
+    fix_your_original_environment()

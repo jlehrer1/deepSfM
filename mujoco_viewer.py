@@ -1,262 +1,339 @@
+"""
+MuJoCo Environment Tester for SfM Reconstructions
+
+Tests environments created from Structure from Motion data in MuJoCo physics simulator.
+Uses separate meshes for each component to avoid convex hull collision issues.
+"""
+
 import numpy as np
 import open3d as o3d
 import mujoco
-import mujoco.viewer
 import time
+from pathlib import Path
 
-# Load your data
-data = np.load('camera_view_ground_env.npz')
-normalized_data = {
-    'points': data['points'],
-    'colors': data['colors'],
-    'camera_positions': data['camera_positions'],
-    'camera_directions': data['camera_directions']
-}
 
-def debug_mesh_properties(mesh, name="mesh"):
-    """Debug mesh properties that might cause collision issues"""
-    print(f"\n=== {name} Debug Info ===")
-    print(f"Vertices: {len(mesh.vertices)}")
-    print(f"Triangles: {len(mesh.triangles)}")
+class MuJoCoEnvironmentTester:
+    """Test SfM environments in MuJoCo physics simulator"""
     
-    # Check mesh integrity
-    print(f"Watertight: {mesh.is_watertight()}")
-    print(f"Vertex manifold: {mesh.is_vertex_manifold()}")
-    print(f"Edge manifold: {mesh.is_edge_manifold()}")
-    print(f"Self-intersecting: {mesh.is_self_intersecting()}")
-    
-    # Check bounds
-    bounds = mesh.get_axis_aligned_bounding_box()
-    print(f"Bounds: min={bounds.min_bound}, max={bounds.max_bound}")
-    
-    # Check normals
-    if len(mesh.triangle_normals) > 0:
-        normals = np.asarray(mesh.triangle_normals)
-        up_facing = np.sum(normals[:, 2] > 0.8)  # Nearly vertical up
-        down_facing = np.sum(normals[:, 2] < -0.8)  # Nearly vertical down
-        print(f"Up-facing triangles: {up_facing}")
-        print(f"Down-facing triangles: {down_facing}")
+    def __init__(self, meshes, mesh_dir="."):
+        """
+        Args:
+            meshes: Dictionary of mesh objects from RLMeshCreator
+            mesh_dir: Directory to save mesh files
+        """
+        self.meshes = meshes
+        self.mesh_dir = Path(mesh_dir)
+        self.mesh_files = {}
+        self.bounds = self._calculate_bounds()
         
-        # Check for horizontal faces (potential ceiling)
-        horizontal = np.sum(np.abs(normals[:, 2]) > 0.9)
-        print(f"Horizontal faces (potential ceiling): {horizontal}")
-
-def create_simple_test_environment():
-    """Create the simplest possible environment to test"""
-    print("Creating minimal test environment...")
+    def _calculate_bounds(self):
+        """Calculate overall bounds of all meshes"""
+        all_vertices = []
+        for mesh in self.meshes.values():
+            vertices = np.asarray(mesh.vertices)
+            if len(vertices) > 0:
+                all_vertices.append(vertices)
+        
+        if all_vertices:
+            all_vertices = np.vstack(all_vertices)
+            return {
+                'min': all_vertices.min(axis=0),
+                'max': all_vertices.max(axis=0)
+            }
+        return {'min': np.zeros(3), 'max': np.ones(3)}
     
-    # Just a ground plane and 4 walls - nothing fancy
-    ground_size = 10
-    wall_height = 3
-    wall_thickness = 0.2
+    def save_meshes(self):
+        """Save all meshes as OBJ files"""
+        print("\nSaving meshes...")
+        for name, mesh in self.meshes.items():
+            filename = self.mesh_dir / f"{name}.obj"
+            success = o3d.io.write_triangle_mesh(str(filename), mesh, write_ascii=True)
+            if success:
+                self.mesh_files[name] = filename.name
+                print(f"  {name}: {len(mesh.vertices)} vertices, {len(mesh.triangles)} triangles")
+            else:
+                print(f"  Failed to save {name}")
+        return len(self.mesh_files) == len(self.meshes)
     
-    # Ground plane
-    ground = o3d.geometry.TriangleMesh.create_box(ground_size, ground_size, 0.1)
-    ground.translate([-ground_size/2, -ground_size/2, -0.1])
-    ground.paint_uniform_color([0.6, 0.4, 0.2])
-    
-    # 4 walls (NO TOP)
-    walls = []
-    
-    # Front wall
-    wall = o3d.geometry.TriangleMesh.create_box(ground_size, wall_thickness, wall_height)
-    wall.translate([-ground_size/2, -ground_size/2 - wall_thickness, 0])
-    walls.append(wall)
-    
-    # Back wall
-    wall = o3d.geometry.TriangleMesh.create_box(ground_size, wall_thickness, wall_height)
-    wall.translate([-ground_size/2, ground_size/2, 0])
-    walls.append(wall)
-    
-    # Left wall
-    wall = o3d.geometry.TriangleMesh.create_box(wall_thickness, ground_size, wall_height)
-    wall.translate([-ground_size/2 - wall_thickness, -ground_size/2, 0])
-    walls.append(wall)
-    
-    # Right wall
-    wall = o3d.geometry.TriangleMesh.create_box(wall_thickness, ground_size, wall_height)
-    wall.translate([ground_size/2, -ground_size/2, 0])
-    walls.append(wall)
-    
-    # Combine all
-    combined = ground
-    for wall in walls:
-        wall.paint_uniform_color([0.8, 0.8, 0.9])
-        combined += wall
-    
-    combined.compute_vertex_normals()
-    
-    return combined
-
-def create_point_cloud_only_environment():
-    """Use ONLY the point cloud data, no mesh reconstruction"""
-    print("Creating environment from point cloud only...")
-    
-    points = normalized_data['points']
-    min_z = points[:, 2].min()
-    max_z = points[:, 2].max()
-    
-    # Create ground at minimum Z
-    ground_size = 15
-    ground_thickness = 0.2
-    ground = o3d.geometry.TriangleMesh.create_box(ground_size, ground_size, ground_thickness)
-    ground.translate([-ground_size/2, -ground_size/2, min_z - ground_thickness])
-    ground.paint_uniform_color([0.6, 0.4, 0.2])
-    
-    # Create walls around the point cloud bounds
-    bounds_min = points.min(axis=0)
-    bounds_max = points.max(axis=0)
-    
-    wall_height = max_z - min_z + 1
-    wall_thickness = 0.3
-    
-    # Expand bounds slightly
-    margin = 1.0
-    x_min, y_min = bounds_min[:2] - margin
-    x_max, y_max = bounds_max[:2] + margin
-    
-    walls = []
-    
-    # 4 boundary walls
-    wall_configs = [
-        ([x_min - wall_thickness, y_min, min_z], [wall_thickness, y_max - y_min, wall_height]),
-        ([x_max, y_min, min_z], [wall_thickness, y_max - y_min, wall_height]),
-        ([x_min, y_min - wall_thickness, min_z], [x_max - x_min, wall_thickness, wall_height]),
-        ([x_min, y_max, min_z], [x_max - x_min, wall_thickness, wall_height])
-    ]
-    
-    for pos, size in wall_configs:
-        wall = o3d.geometry.TriangleMesh.create_box(size[0], size[1], size[2])
-        wall.translate(pos)
-        wall.paint_uniform_color([0.8, 0.8, 0.9])
-        walls.append(wall)
-    
-    # Combine
-    combined = ground
-    for wall in walls:
-        combined += wall
-    
-    combined.remove_duplicated_vertices()
-    combined.remove_duplicated_triangles()
-    combined.compute_vertex_normals()
-    
-    return combined
-
-def test_environment_options():
-    """Test different environment creation approaches"""
-    
-    print("\n" + "="*60)
-    print("TESTING DIFFERENT ENVIRONMENT APPROACHES")
-    print("="*60)
-    
-    # Option 1: Simple test environment
-    print("\n1. Testing simple box environment...")
-    simple_env = create_simple_test_environment()
-    debug_mesh_properties(simple_env, "Simple Environment")
-    test_mesh_in_mujoco(simple_env, "simple_test.obj", "Simple Test")
-    
-    # Option 2: Point cloud bounds only
-    print("\n2. Testing point cloud bounds environment...")
-    pc_env = create_point_cloud_only_environment()
-    debug_mesh_properties(pc_env, "Point Cloud Environment")
-    test_mesh_in_mujoco(pc_env, "pointcloud_test.obj", "Point Cloud Test")
-
-def test_mesh_in_mujoco(mesh, filename, description):
-    """Test a mesh in MuJoCo to see if ball falls properly"""
-    
-    # Save mesh
-    success = o3d.io.write_triangle_mesh(filename, mesh, write_ascii=True)
-    if not success:
-        print(f"Failed to save {filename}")
-        return
-    
-    bounds = mesh.get_axis_aligned_bounding_box()
-    min_bound = bounds.min_bound
-    max_bound = bounds.max_bound
-    
-    agent_start_height = max_bound[2] + 2.0
-    ground_level = min_bound[2]
-    
-    # Create MuJoCo XML
-    mjcf = f"""
-<mujoco model="test_{description.lower().replace(' ', '_')}">
-    <compiler angle="degree" meshdir="." />
+    def create_mjcf_xml(self, enable_env_collision=True, agent_radius=0.15):
+        """
+        Create MuJoCo XML string for the environment.
+        
+        Args:
+            enable_env_collision: Whether environment mesh has collision
+            agent_radius: Radius of test ball agent
+        """
+        # Calculate positions
+        ground_z = self.bounds['min'][2]
+        agent_start_z = self.bounds['max'][2] + 1.0
+        
+        # Start XML
+        xml = f"""<mujoco model="sfm_environment">
+    <compiler angle="degree" meshdir="{self.mesh_dir}" />
     <option timestep="0.01" gravity="0 0 -9.81"/>
     
     <asset>
-        <mesh name="test_mesh" file="{filename}"/>
-    </asset>
+"""
+        
+        # Add mesh assets
+        for name, filename in self.mesh_files.items():
+            xml += f'        <mesh name="{name}" file="{filename}"/>\n'
+        
+        xml += """    </asset>
     
     <worldbody>
-        <!-- Test environment -->
-        <geom name="environment" type="mesh" mesh="test_mesh" pos="0 0 0" 
-              rgba="0.7 0.7 0.7 1" 
+"""
+        
+        # Add ground mesh
+        if 'ground' in self.mesh_files:
+            xml += """        <!-- Ground plane -->
+        <geom name="ground" type="mesh" mesh="ground" pos="0 0 0" 
+              rgba="0.4 0.3 0.2 1" 
               contype="1" conaffinity="1" 
               friction="1 0.5 0.5"/>
+"""
         
-        <!-- Test ball -->
-        <body name="agent" pos="0 0 {agent_start_height}">
+        # Add wall meshes
+        for i in range(4):
+            if f'wall_{i}' in self.mesh_files:
+                xml += f"""        
+        <!-- Wall {i} -->
+        <geom name="wall_{i}" type="mesh" mesh="wall_{i}" pos="0 0 0" 
+              rgba="0.8 0.8 0.9 1" 
+              contype="1" conaffinity="1" 
+              friction="1 0.5 0.5"/>
+"""
+        
+        # Add environment mesh
+        if 'environment' in self.mesh_files:
+            if enable_env_collision:
+                xml += """        
+        <!-- Environment mesh (building) WITH COLLISION -->
+        <geom name="environment" type="mesh" mesh="environment" pos="0 0 0" 
+              rgba="0.7 0.7 0.7 1" 
+              contype="1" conaffinity="1"
+              friction="1 0.5 0.5"
+              condim="1"/>
+"""
+            else:
+                xml += """        
+        <!-- Environment mesh (building) VISUAL ONLY -->
+        <geom name="environment" type="mesh" mesh="environment" pos="0 0 0" 
+              rgba="0.7 0.7 0.7 1" 
+              contype="0" conaffinity="0"/>
+"""
+        
+        # Add test agent
+        xml += f"""
+        <!-- Test agent (ball) -->
+        <body name="agent" pos="0 0 {agent_start_z}">
             <freejoint/>
-            <geom name="agent_body" type="sphere" size="0.2" 
-                  rgba="1 0 0 1"
-                  contype="2" conaffinity="1"
-                  mass="1.0"/>
-            <inertial pos="0 0 0" mass="1" diaginertia="0.08 0.08 0.08"/>
+            <geom name="agent_geom" type="sphere" size="{agent_radius}" 
+                  rgba="1 0.2 0.2 1"
+                  contype="2" conaffinity="1"/>
+            <inertial pos="0 0 0" mass="1" diaginertia="0.1 0.1 0.1"/>
         </body>
         
-        <!-- Visual reference -->
-        <geom name="reference" type="sphere" size="0.1" pos="0 0 {max_bound[2] + 0.5}"
+        <!-- Visual markers -->
+        <geom name="ground_marker" type="cylinder" size="0.1 0.02" 
+              pos="0 0 {ground_z + 0.02}" 
               rgba="0 1 0 0.5" contype="0" conaffinity="0"/>
     </worldbody>
     
     <contact>
-        <pair geom1="agent_body" geom2="environment"/>
-    </contact>
+        <pair geom1="agent_geom" geom2="ground"/>
+"""
+        
+        # Add wall contacts
+        for i in range(4):
+            if f'wall_{i}' in self.mesh_files:
+                xml += f'        <pair geom1="agent_geom" geom2="wall_{i}"/>\n'
+        
+        # Add environment contact if collision enabled
+        if 'environment' in self.mesh_files and enable_env_collision:
+            xml += '        <pair geom1="agent_geom" geom2="environment"/>\n'
+        
+        xml += """    </contact>
 </mujoco>
 """
-    
-    print(f"\nTesting {description}:")
-    print(f"Agent starts at Z = {agent_start_height:.2f}")
-    print(f"Ground at Z = {ground_level:.2f}")
-    print(f"Expected fall distance = {agent_start_height - ground_level:.2f}")
-    
-    try:
-        model = mujoco.MjModel.from_xml_string(mjcf)
-        data = mujoco.MjData(model)
         
-        # Run a quick simulation test
-        print("Running 5-second physics test...")
+        return xml
+    
+    def run_drop_test(self, model, data, duration=15.0, log_interval=1.0):
+        """Run physics simulation and log ball position"""
+        print("\nRunning drop test...")
         
-        for step in range(500):  # 5 seconds
+        steps_per_second = int(1.0 / model.opt.timestep)
+        total_steps = int(duration * steps_per_second)
+        log_steps = int(log_interval * steps_per_second)
+        
+        agent_start_z = data.qpos[2]
+        ground_z = self.bounds['min'][2]
+        expected_z = ground_z + 0.15  # Assuming ball radius of 0.15
+        
+        positions = []
+        
+        for step in range(total_steps):
             mujoco.mj_step(model, data)
             
-            if step % 100 == 0:  # Every second
-                agent_z = data.qpos[2]
-                fall_distance = agent_start_height - agent_z
-                print(f"  t={step/100:.0f}s: Z={agent_z:.3f}, fell {fall_distance:.3f}")
+            if step % log_steps == 0 or step == total_steps - 1:
+                t = step / steps_per_second
+                z = data.qpos[2]
+                vz = data.qvel[2]
+                positions.append((t, z, vz))
+                print(f"  t={t:.1f}s: Z={z:.3f}, Vz={vz:.3f}")
         
-        final_z = data.qpos[2]
-        total_fall = agent_start_height - final_z
+        # Final analysis
+        final_z = positions[-1][1]
+        print(f"\nDrop test results:")
+        print(f"  Started at: Z={agent_start_z:.3f}")
+        print(f"  Ended at: Z={final_z:.3f}")
+        print(f"  Expected: Z={expected_z:.3f} (ground + radius)")
+        print(f"  Ground level: Z={ground_z:.3f}")
         
-        if total_fall < 0.5:
-            print(f"❌ PROBLEM: Ball only fell {total_fall:.3f} units - likely hitting invisible collision!")
-        elif final_z > ground_level + 0.5:
-            print(f"❌ PROBLEM: Ball stopped at Z={final_z:.3f}, should be near {ground_level:.3f}")
-        else:
-            print(f"✅ SUCCESS: Ball fell {total_fall:.3f} units and landed properly")
-            
-        return model, data
-        
-    except Exception as e:
-        print(f"❌ Failed to load model: {e}")
-        return None, None
-
-# Run the tests
-if __name__ == "__main__":
-    test_environment_options()
+        success = abs(final_z - expected_z) < 0.05
+        return success, positions
     
-    print("\n" + "="*60)
-    print("If the simple test works but point cloud test fails,")
-    print("the issue is with mesh reconstruction from your point cloud.")
-    print("If both fail, it's a more fundamental MuJoCo setup issue.")
+    def test_environment(self, enable_env_collision=True, visualize=True):
+        """
+        Test the environment in MuJoCo.
+        
+        Args:
+            enable_env_collision: Whether environment mesh has collision
+            visualize: Whether to launch interactive viewer
+        """
+        # Save meshes
+        if not self.save_meshes():
+            print("Failed to save meshes!")
+            return False
+        
+        # Create and save XML
+        xml = self.create_mjcf_xml(enable_env_collision=enable_env_collision)
+        xml_path = self.mesh_dir / "environment.xml"
+        with open(xml_path, 'w') as f:
+            f.write(xml)
+        print(f"\nSaved MuJoCo XML: {xml_path}")
+        
+        # Load in MuJoCo
+        try:
+            model = mujoco.MjModel.from_xml_string(xml)
+            data = mujoco.MjData(model)
+            print("✅ Successfully loaded in MuJoCo!")
+        except Exception as e:
+            print(f"❌ Failed to load in MuJoCo: {e}")
+            return False
+        
+        # Run drop test
+        success, positions = self.run_drop_test(model, data)
+        
+        # Interactive visualization
+        if visualize:
+            print("\nLaunching interactive viewer...")
+            print("Controls:")
+            print("  - Close window to exit")
+            print("  - Ball resets every 5 seconds")
+            
+            try:
+                # Try to get viewer function
+                if hasattr(mujoco, 'viewer'):
+                    viewer = mujoco.viewer.launch_passive(model, data)
+                    
+                    step = 0
+                    agent_start_pos = data.qpos[:3].copy()
+                    
+                    while viewer.is_running():
+                        # Reset every 5 seconds
+                        if step % 500 == 0 and step > 0:
+                            data.qpos[:3] = agent_start_pos
+                            data.qpos[3:7] = [1, 0, 0, 0]  # Reset orientation
+                            data.qvel[:] = 0
+                            print(f"Reset ball to Z={agent_start_pos[2]:.3f}")
+                        
+                        mujoco.mj_step(model, data)
+                        viewer.sync()
+                        step += 1
+                        time.sleep(0.01)
+                else:
+                    print("Note: Interactive viewer not available in this MuJoCo version")
+                    
+            except Exception as e:
+                print(f"Viewer error: {e}")
+        
+        return success
+
+
+def test_sfm_environment(data_path='camera_view_ground_env.npz', 
+                        enable_env_collision=True,
+                        visualize_meshes=False,
+                        test_physics=True):
+    """
+    Complete pipeline to test SfM environment in MuJoCo.
+    
+    Args:
+        data_path: Path to normalized SfM data (.npz file)
+        enable_env_collision: Whether building mesh has collision
+        visualize_meshes: Show meshes in Open3D before testing
+        test_physics: Run MuJoCo physics test
+    """
     print("="*60)
+    print("SfM to MuJoCo Environment Test")
+    print("="*60)
+    
+    # Load data
+    print(f"\nLoading data from: {data_path}")
+    data = np.load(data_path)
+    normalized_data = {
+        'points': data['points'],
+        'colors': data['colors'],
+        'camera_positions': data.get('camera_positions', []),
+        'camera_directions': data.get('camera_directions', [])
+    }
+    
+    # Import the mesh creator
+    try:
+        from deepsfm.mesh_creator import create_rl_environment
+    except ImportError:
+        print("Error: Could not import mesh_creator module")
+        print("Make sure the RLMeshCreator class is saved as 'mesh_creator.py'")
+        return
+    
+    # Create environment
+    env_data = create_rl_environment(
+        normalized_data, 
+        add_walls=True, 
+        simplify=True, 
+        visualize=visualize_meshes
+    )
+    
+    if not test_physics:
+        print("\nSkipping physics test.")
+        return
+    
+    # Test in MuJoCo
+    print("\n" + "-"*60)
+    collision_mode = "WITH collision" if enable_env_collision else "NO collision (visual only)"
+    print(f"Testing in MuJoCo - Environment mesh {collision_mode}")
+    print("-"*60)
+    
+    tester = MuJoCoEnvironmentTester(env_data['meshes'])
+    success = tester.test_environment(
+        enable_env_collision=enable_env_collision,
+        visualize=True
+    )
+    
+    if success:
+        print("\n🎉 Environment is ready for RL training!")
+    else:
+        print("\n⚠️  Environment may need adjustments for RL training")
+    
+    return success
+
+
+if __name__ == "__main__":
+    # Test with visual-only environment mesh (safer)
+    print("\n1. Testing with environment mesh (visual only)...")
+    test_sfm_environment(enable_env_collision=True)
+    
+    # Uncomment to test with collision-enabled environment
+    # print("\n\n2. Testing with environment mesh (collision enabled)...")
+    # test_sfm_environment(enable_env_collision=True, visualize_meshes=False)
