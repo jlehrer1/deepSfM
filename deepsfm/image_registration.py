@@ -370,7 +370,10 @@ class DeepClipFeatureMatchingCOLMAP(COLMAPClipRegistration):
 
         feature_map = {}
         for file in tqdm(files):
-            img = load_image(os.path.join(img_dir, file))
+            try:
+                img = load_image(os.path.join(img_dir, file))
+            except:
+                print(f"Could not read {os.path.join(img_dir, file)}, continuing...")
             img = img.to(self.device)
             feats = self.feature_extractor.extract(img)
             feature_map[file] = feats
