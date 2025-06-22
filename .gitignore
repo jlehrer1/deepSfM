@@ -188,3 +188,5 @@ wall_2.obj
 wall_2_mesh.obj
 wall_3.obj
 wall_3_mesh.obj
+example_script.py
+mujoco_viewer.py
