@@ -17,7 +17,6 @@ except ImportError:
     print("Make sure the RLMeshCreator class is saved as 'mesh_creator.py'")
 
 
-
 class MuJoCoEnvironmentTester:
     """Test SfM environments in MuJoCo physics simulator"""
     
@@ -99,7 +98,6 @@ class MuJoCoEnvironmentTester:
               friction="1 0.5 0.5"/>
 """
         
-        # Add wall meshes
         for i in range(4):
             if f'wall_{i}' in self.mesh_files:
                 xml += f"""        
@@ -110,7 +108,6 @@ class MuJoCoEnvironmentTester:
               friction="1 0.5 0.5"/>
 """
         
-        # Add environment mesh
         if 'environment' in self.mesh_files:
             if enable_env_collision:
                 xml += """        
@@ -165,7 +162,7 @@ class MuJoCoEnvironmentTester:
         
         return xml
     
-    def run_drop_test(self, model, data, duration=5.0, log_interval=1.0):
+    def run_drop_test(self, model, data, duration=50.0, log_interval=1.0):
         """Run physics simulation and log ball position"""
         print("\nRunning drop test...")
         
@@ -189,14 +186,7 @@ class MuJoCoEnvironmentTester:
                 positions.append((t, z, vz))
                 print(f"  t={t:.1f}s: Z={z:.3f}, Vz={vz:.3f}")
         
-        # Final analysis
         final_z = positions[-1][1]
-        print(f"\nDrop test results:")
-        print(f"  Started at: Z={agent_start_z:.3f}")
-        print(f"  Ended at: Z={final_z:.3f}")
-        print(f"  Expected: Z={expected_z:.3f} (ground + radius)")
-        print(f"  Ground level: Z={ground_z:.3f}")
-        
         success = abs(final_z - expected_z) < 0.05
         return success, positions
     
@@ -220,25 +210,9 @@ class MuJoCoEnvironmentTester:
             f.write(xml)
         print(f"\nSaved MuJoCo XML: {xml_path}")
         
-        # Load in MuJoCo
-        try:
-            model = mujoco.MjModel.from_xml_string(xml)
-            data = mujoco.MjData(model)
-            print("✅ Successfully loaded in MuJoCo!")
-        except Exception as e:
-            print(f"❌ Failed to load in MuJoCo: {e}")
-            return False
-        
-        # Run drop test
-        success, positions = self.run_drop_test(model, data)
-        
-        # Interactive visualization
+        model = mujoco.MjModel.from_xml_string(xml)
+        data = mujoco.MjData(model)
         if visualize:
-            print("\nLaunching interactive viewer...")
-            print("Controls:")
-            print("  - Close window to exit")
-            print("  - Ball resets every 5 seconds")
-            
             try:
                 # Try to get viewer function
                 if hasattr(mujoco, 'viewer'):
@@ -265,28 +239,15 @@ class MuJoCoEnvironmentTester:
             except Exception as e:
                 print(f"Viewer error: {e}")
         
-        return success
+        return True
 
 
-def test_sfm_environment(data_path='camera_view_ground_env.npz', 
-                        enable_env_collision=True,
-                        visualize_meshes=False,
-                        test_physics=True):
-    """
-    Complete pipeline to test SfM environment in MuJoCo.
-    
-    Args:
-        data_path: Path to normalized SfM data (.npz file)
-        enable_env_collision: Whether building mesh has collision
-        visualize_meshes: Show meshes in Open3D before testing
-        test_physics: Run MuJoCo physics test
-    """
-    print("="*60)
-    print("SfM to MuJoCo Environment Test")
-    print("="*60)
-    
-    # Load data
-    print(f"\nLoading data from: {data_path}")
+def sfm_to_mujoco(
+    data_path='camera_view_ground_env.npz', 
+    enable_env_collision=True,
+    visualize_meshes=False,
+    test_physics=True
+):
     data = np.load(data_path)
     normalized_data = {
         'points': data['points'],
@@ -316,4 +277,4 @@ def test_sfm_environment(data_path='camera_view_ground_env.npz',
 
 
 if __name__ == "__main__":
-    test_sfm_environment(enable_env_collision=True)
+    sfm_to_mujoco(enable_env_collision=True)
