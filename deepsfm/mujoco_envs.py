@@ -8,9 +8,6 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from pathlib import Path
-from collections import deque
-import matplotlib.pyplot as plt
-from tqdm import tqdm
 
 class MuJoCoEnvironmentTester:
     """Test SfM environments in MuJoCo physics simulator"""
