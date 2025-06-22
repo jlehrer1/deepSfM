@@ -333,7 +333,3 @@ if __name__ == "__main__":
     # Test with visual-only environment mesh (safer)
     print("\n1. Testing with environment mesh (visual only)...")
     test_sfm_environment(enable_env_collision=True)
-    
-    # Uncomment to test with collision-enabled environment
-    # print("\n\n2. Testing with environment mesh (collision enabled)...")
-    # test_sfm_environment(enable_env_collision=True, visualize_meshes=False)
